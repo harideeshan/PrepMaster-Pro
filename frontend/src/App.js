@@ -1,17 +1,24 @@
 import React, { useEffect, useState } from 'react';
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import './App.css';
 
 function App() {
   const [questions, setQuestions] = useState([]);
   const [score, setScore] = useState(0);
   const [answeredCount, setAnsweredCount] = useState(0);
   const [activeCategory, setActiveCategory] = useState("All");
-  const [answeredQuestions, setAnsweredQuestions] = useState({}); // Changed to object to store user choice
+  
+  // ✅ NEW: Difficulty State
+  const [activeDifficulty, setActiveDifficulty] = useState("All");
+  
+  const [answeredQuestions, setAnsweredQuestions] = useState({});
   const [searchTerm, setSearchTerm] = useState("");
-  const [explanation, setExplanation] = useState("");
   const [loadingAI, setLoadingAI] = useState(false);
   const [currentExplainingId, setCurrentExplainingId] = useState(null);
-  const [cooldown, setCooldown] = useState(false);
+  const [explanations, setExplanations] = useState({});
+  const [highScore, setHighScore] = useState(localStorage.getItem("highScore") || 0);
+
+  const [currentPage, setCurrentPage] = useState(1);
+  const questionsPerPage = 5;
 
   const fetchQuestions = (category = "All") => {
     const url = category === "All" 
@@ -20,216 +27,177 @@ function App() {
     
     fetch(url)
       .then(res => res.json())
-      .then(data => setQuestions(data))
+      .then(data => {
+        const shuffled = data.sort(() => Math.random() - 0.5);
+        setQuestions(shuffled);
+        setCurrentPage(1); 
+      })
       .catch(err => console.error("Fetch error:", err));
   };
-  const [explanations, setExplanations] = useState({});
+
   const askGemini = async (question, correctOption) => {
-  setLoadingAI(true);
-  setCurrentExplainingId(question.id);
-  const apiKey = process.env.REACT_APP_GEMINI_KEY;
+    setLoadingAI(true);
+    setCurrentExplainingId(question.id);
+    const apiKey = process.env.REACT_APP_GEMINI_KEY;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
-
-  try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ 
-          parts: [{ 
-            text: `You are a Java/DSA expert. Briefly explain why "${correctOption}" is the correct answer to: "${question.questionTitle}". 2 sentences max.` 
-          }] 
-        }]
-      })
-    });
-
-    const data = await response.json();
-    
-    if (data.candidates && data.candidates[0].content.parts[0].text) {
-      const aiText = data.candidates[0].content.parts[0].text;
-      setExplanations(prev => ({ ...prev, [question.id]: aiText }));
-    } else {
-      throw new Error(data.error?.message || "AI check failed");
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `Explain why "${correctOption}" is the correct answer to: "${question.questionTitle}". 2 sentences max.` }] }]
+        })
+      });
+      const data = await response.json();
+      if (data.candidates) {
+        setExplanations(prev => ({ ...prev, [question.id]: data.candidates[0].content.parts[0].text }));
+      }
+    } catch (error) {
+      setExplanations(prev => ({ ...prev, [question.id]: "AI error. Try again." }));
+    } finally {
+      setLoadingAI(false);
     }
-  } catch (error) {
-    console.error("Gemini Error:", error);
-    setExplanations(prev => ({ 
-      ...prev, 
-      [question.id]: "AI Status: Rate limit reached or connection issue. Try again in 10s!" 
-    }));
-  } finally {
-    setLoadingAI(false);
-  }
-};
-
-  useEffect(() => {
-    fetchQuestions();
-  }, []);
-
-  const handleCategoryChange = (cat) => {
-    setActiveCategory(cat);
-    fetchQuestions(cat);
-    setScore(0);
-    setAnsweredCount(0);
-    setAnsweredQuestions({});
-    setExplanation("");
   };
+
+  useEffect(() => { fetchQuestions(); }, []);
+
+  // ✅ Updated Filter Logic: Combines Search, Category, and Difficulty
+  const filteredQuestions = questions.filter(q => {
+    const matchesSearch = q.questionTitle.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesCategory = activeCategory === "All" || q.category === activeCategory;
+    const matchesDifficulty = activeDifficulty === "All" || q.difficultyLevel === activeDifficulty;
+    return matchesSearch && matchesCategory && matchesDifficulty;
+  });
 
   const handleAnswer = (questionId, selected, correct) => {
     if (answeredQuestions[questionId]) return;
-    
-    if (selected === correct) setScore(prev => prev + 1);
+    let newScore = score;
+    if (selected === correct) {
+      newScore = score + 1;
+      setScore(newScore);
+    }
     setAnsweredCount(prev => prev + 1);
-    
-    // Save the user's answer to show Green/Red feedback
     setAnsweredQuestions(prev => ({...prev, [questionId]: selected}));
+    if (newScore > highScore) {
+      setHighScore(newScore);
+      localStorage.setItem("highScore", newScore);
+    }
   };
 
-  const filteredQuestions = questions.filter(q => 
-    q.questionTitle.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const indexOfLastQuestion = currentPage * questionsPerPage;
+  const indexOfFirstQuestion = indexOfLastQuestion - questionsPerPage;
+  const currentQuestions = filteredQuestions.slice(indexOfFirstQuestion, indexOfLastQuestion);
+  const totalPages = Math.ceil(filteredQuestions.length / questionsPerPage);
 
   return (
     <div className="container">
-      {/* HEADER SECTION */}
-      <div className="header shadow-sm">
-        <div>
-          <h1 style={{ fontWeight: '900', letterSpacing: '-1px' }}>PrepMaster AI</h1>
-          <p style={{ color: '#666', fontSize: '0.9rem' }}>Powered by Google Gemini 1.5</p>
+      <header className="main-header">
+        <h1 className="logo-text">PrepMaster Pro</h1>
+        <div className="header-stats">
+          <div className="stat-pill">Accuracy: {questions.length > 0 ? Math.round((score/questions.length)*100) : 0}%</div>
+          <div className="stat-pill">Best: {highScore}</div>
         </div>
-        <div className="score-badge">
-          <div style={{ fontSize: '0.6rem', fontWeight: 'bold' }}>PROGRESS</div>
-          <div style={{ fontSize: '1.4rem', fontWeight: '900' }}>{score} / {questions.length}</div>
-        </div>
-      </div>
+      </header>
 
-      {/* SEARCH & FILTER SECTION */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px', marginBottom: '25px' }}>
-        <div className="filter-bar" style={{ marginBottom: 0 }}>
+      <div className="toolbar">
+        {/* Category Filters */}
+        <div className="filter-group">
           {["All", "Java", "DSA", "SQL"].map(cat => (
-            <button
-              key={cat}
-              onClick={() => handleCategoryChange(cat)}
-              className={`filter-btn ${activeCategory === cat ? "active" : ""}`}
-            >
+            <button key={cat} onClick={() => { setActiveCategory(cat); setCurrentPage(1); }} className={`nav-btn ${activeCategory === cat ? "active" : ""}`}>
               {cat}
             </button>
           ))}
         </div>
-        
+
+        {/* ✅ Difficulty Filters */}
+        <div className="filter-group" style={{ marginTop: '10px' }}>
+          {["All", "Easy", "Medium", "Hard"].map(level => (
+            <button 
+              key={level} 
+              onClick={() => { setActiveDifficulty(level); setCurrentPage(1); }} 
+              className={`diff-btn ${activeDifficulty === level ? `active-${level}` : ""}`}
+            >
+              {level}
+            </button>
+          ))}
+        </div>
+
         <input 
-          type="text"
-          placeholder="Search questions..."
-          className="search-input"
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          style={{ padding: '10px 15px', borderRadius: '10px', border: '1px solid #ddd', width: '250px', outline: 'none' }}
+          type="text" placeholder="Search questions..." className="search-bar"
+          value={searchTerm} onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
         />
       </div>
 
-      {/* PROGRESS BAR */}
-      <div style={{ width: '100%', backgroundColor: '#e0e0e0', height: '8px', borderRadius: '10px', marginBottom: '30px', overflow: 'hidden' }}>
-        <div 
-          style={{ width: `${(answeredCount / (questions.length || 1)) * 100}%`, backgroundColor: '#10b981', height: '100%', transition: 'width 0.4s ease' }}
-        ></div>
-      </div>
-
-      {/* QUESTIONS LIST */}
-      <div className="questions-list">
-        {filteredQuestions.map((q, index) => {
+      <div className="questions-grid">
+        {currentQuestions.length > 0 ? currentQuestions.map((q, index) => {
           const userChoice = answeredQuestions[q.id];
           const isAnswered = !!userChoice;
 
           return (
-            <div key={q.id} className="question-card">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <span className="category-tag">{q.category}</span>
-                  <span className={`difficulty-badge difficulty-${q.difficultyLevel}`}>
-                    {q.difficultyLevel}
-                  </span>
-                </div>
-                <span style={{ color: '#aaa', fontWeight: 'bold', fontSize: '0.8rem' }}>#{index + 1}</span>
+            <div key={q.id} className="study-card animate-in">
+              <div className="card-header">
+                <span className={`tag difficulty-${q.difficultyLevel}`}>{q.difficultyLevel}</span>
+                <span className="question-index">Q {indexOfFirstQuestion + index + 1}</span>
               </div>
-              
-              <h3 style={{ fontSize: '1.2rem', lineHeight: '1.4', fontWeight: '700', color: '#1f2937' }}>
-                {q.questionTitle}
-              </h3>
-              
-              <div className="options-grid">
-                {[q.option1, q.option2, q.option3, q.option4].map((option) => {
-                  let bgColor = 'white';
-                  let textColor = '#374151';
-
-                  if (isAnswered) {
-                    if (option === q.rightAnswer) {
-                      bgColor = '#dcfce7'; // Correct is always green
-                      textColor = '#166534';
-                    } else if (option === userChoice) {
-                      bgColor = '#fee2e2'; // Wrong user choice is red
-                      textColor = '#991b1b';
-                    } else {
-                      bgColor = '#f9fafb';
-                      textColor = '#9ca3af';
-                    }
-                  }
-
-                  return (
+              <h3 className="question-text">{q.questionTitle}</h3>
+              <div className="options-container">
+                {[q.option1, q.option2, q.option3, q.option4].map((option) => (
+                  <button 
+                    key={option} disabled={isAnswered} 
+                    onClick={() => handleAnswer(q.id, option, q.rightAnswer)}
+                    className={`option-row ${isAnswered ? (option === q.rightAnswer ? "correct" : (option === userChoice ? "wrong" : "ignored")) : ""}`}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+              {isAnswered && (
+                <div className="ai-section">
+                  {!explanations[q.id] ? (
                     <button 
-                      key={option}
-                      disabled={isAnswered}
-                      onClick={() => handleAnswer(q.id, option, q.rightAnswer)}
-                      className="option-btn"
-                      style={{ backgroundColor: bgColor, color: textColor, border: isAnswered && option === q.rightAnswer ? '2px solid #22c55e' : '1px solid #ddd' }}
+                      disabled={loadingAI}
+                      onClick={() => { askGemini(q, q.rightAnswer); }}
+                      className="ai-trigger-btn"
                     >
-                      {option}
+                      {loadingAI && currentExplainingId === q.id ? "Analyzing..." : "💡 Get AI Insight"}
                     </button>
-                  );
-                })}
-              </div>
-
-              {/* AI EXPLANATION SECTION */}
-               {/* AI EXPLANATION SECTION */}
-{isAnswered && (
-  <div style={{ marginTop: '20px', padding: '15px', background: '#f0f7ff', borderRadius: '10px', borderLeft: '5px solid #1a73e8' }}>
-    
-    <button 
-      disabled={loadingAI || cooldown}
-      onClick={() => {
-        askGemini(q, q.rightAnswer);
-        setCooldown(true);
-        setTimeout(() => setCooldown(false), 10000); // 10 second cooldown
-      }}
-      className="filter-btn"
-      style={{ 
-        background: cooldown ? '#94a3b8' : '#1a73e8', // Grey out when cooling down
-        color: 'white', 
-        marginBottom: '10px', 
-        fontSize: '0.8rem',
-        cursor: (loadingAI || cooldown) ? 'not-allowed' : 'pointer',
-        transition: 'all 0.3s ease'
-      }}
-    >
-      {loadingAI && currentExplainingId === q.id 
-        ? "Gemini is thinking..." 
-        : cooldown 
-          ? "Wait for cooldown..." 
-          : "💡 Explain with AI"}
-    </button>
-    
-    {explanations[q.id] && (
-      <p style={{ fontSize: '0.85rem', lineHeight: '1.5', color: '#1e3a8a', margin: '10px 0 0 0', fontWeight: '500' }}>
-        {explanations[q.id]}
-      </p>
-    )}
-  </div>
-)}
-              
+                  ) : (
+                    <div className="ai-response">
+                      <strong>AI INSIGHT:</strong>
+                      <p>{explanations[q.id]}</p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           );
-        })}
+        }) : (
+          <div style={{ textAlign: 'center', padding: '40px', color: '#8b949e' }}>
+            No questions found matching these filters.
+          </div>
+        )}
       </div>
+
+      {totalPages > 1 && (
+        <div className="pagination-footer">
+          <button 
+            disabled={currentPage === 1} 
+            onClick={() => {setCurrentPage(currentPage - 1); window.scrollTo(0,0);}}
+            className="nav-btn"
+          >
+            ← Previous
+          </button>
+          <span className="page-info">Page {currentPage} of {totalPages}</span>
+          <button 
+            disabled={currentPage === totalPages} 
+            onClick={() => {setCurrentPage(currentPage + 1); window.scrollTo(0,0);}}
+            className="nav-btn"
+          >
+            Next →
+          </button>
+        </div>
+      )}
     </div>
   );
 }
