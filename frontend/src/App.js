@@ -1,12 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer } from 'recharts';
+import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer, Radar as RadarArea } from 'recharts';
 import './App.css';
 
 function App() {
-  // --- STATE ---
   const [questions, setQuestions] = useState([]);
   const [score, setScore] = useState(0);
-  const [answeredCount, setAnsweredCount] = useState(0);
   const [answeredQuestions, setAnsweredQuestions] = useState({});
   const [searchTerm, setSearchTerm] = useState("");
   const [loadingAI, setLoadingAI] = useState(false);
@@ -16,33 +14,102 @@ function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const questionsPerPage = 5;
 
-  // ✅ NEW: Multi-Domain State
+  // Navigation & Submission States
+  const [isSubmitted, setIsSubmitted] = useState(false);
   const [activeDomain, setActiveDomain] = useState("Technical"); 
-  const [activeSubCategory, setActiveSubCategory] = useState("Java");
+  const [activeSubCategory, setActiveSubCategory] = useState("All");
   const [activeDifficulty, setActiveDifficulty] = useState("All");
 
+  // ✅ NEW: Gamified AI State
+  const [aiAudit, setAiAudit] = useState(null); 
+  const [loadingAudit, setLoadingAudit] = useState(false);
+
   const domains = {
-    Technical: ["Java", "DSA", "SQL", "Python", "HTML", "CSS"],
-    Aptitude: ["Quantitative", "Logical", "Verbal"]
+    Technical: ["All", "Java", "DSA", "SQL", "Python", "HTML", "CSS"],
+    Aptitude: ["All", "Quantitative", "Logical", "Verbal"]
   };
 
-  // --- API CALLS ---
   const fetchQuestions = (category) => {
-    // If no category passed, use current active sub-category
     const target = category || activeSubCategory;
-    const url = `http://localhost:8080/question/category/${target}`;
+    const url = target === "All" 
+      ? "http://localhost:8080/question/allQuestions" 
+      : `http://localhost:8080/question/category/${target}`;
     
     fetch(url)
       .then(res => res.json())
       .then(data => {
-        const shuffled = data.sort(() => Math.random() - 0.5);
-        setQuestions(shuffled);
-        setCurrentPage(1); 
+        setQuestions(data.sort(() => Math.random() - 0.5));
+        handleReset(); 
       })
       .catch(err => console.error("Fetch error:", err));
   };
 
-  useEffect(() => { fetchQuestions("Java"); }, []);
+  useEffect(() => { fetchQuestions("All"); }, []);
+
+  const handleAnswer = (questionId, selectedValue) => {
+    if (isSubmitted) return; 
+    setAnsweredQuestions(prev => ({ ...prev, [questionId]: selectedValue }));
+  };
+
+  const handleReset = () => {
+    setAnsweredQuestions({});
+    setIsSubmitted(false);
+    setScore(0);
+    setExplanations({});
+    setAiAudit(null);
+    setCurrentPage(1);
+  };
+
+  // ✅ NEW: Gamified AI Audit Logic
+  const runAIAudit = async (finalScore, total) => {
+    setLoadingAudit(true);
+    const apiKey = process.env.REACT_APP_GEMINI_KEY;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
+
+    const resultsSummary = questions.map(q => ({
+      category: q.category,
+      difficulty: q.difficultyLevel,
+      correct: answeredQuestions[q.id] === q.rightAnswer
+    }));
+
+    const prompt = `Analyze these test results: ${JSON.stringify(resultsSummary)}. Score: ${finalScore}/${total}. 
+    Provide a JSON response ONLY (no markdown blocks) with:
+    1. "title": (A gaming title like 'Java Ninja' or 'SQL Warlord'),
+    2. "rank": (Bronze, Silver, Gold, Platinum, or Diamond),
+    3. "stats": (Object with 3 skills like 'Syntax', 'Logic', 'Speed' and values 1-100),
+    4. "quests": (Array of 3 very short 5-word missions to improve).`;
+
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      });
+      const data = await response.json();
+      if (data.candidates) {
+        const cleanJson = data.candidates[0].content.parts[0].text.replace(/```json|```/g, "").trim();
+        setAiAudit(JSON.parse(cleanJson));
+      }
+    } catch (e) { 
+      setAiAudit({ title: "Apprentice", rank: "Bronze", stats: { Accuracy: 50, Focus: 50, Speed: 50 }, quests: ["Complete more quizzes", "Review mistakes", "Try harder difficulty"] });
+    }
+    setLoadingAudit(false);
+  };
+
+  const handleSubmitExam = () => {
+    let finalScore = 0;
+    questions.forEach(q => {
+      if (answeredQuestions[q.id] === q.rightAnswer) finalScore++;
+    });
+    setScore(finalScore);
+    setIsSubmitted(true);
+    runAIAudit(finalScore, questions.length);
+    if (finalScore > highScore) {
+      setHighScore(finalScore);
+      localStorage.setItem("highScore", finalScore);
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
 
   const askGemini = async (question, correctOption) => {
     setLoadingAI(true);
@@ -50,20 +117,12 @@ function App() {
     const apiKey = process.env.REACT_APP_GEMINI_KEY;
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=${apiKey}`;
 
-    // ✅ AI Personality Switch
-    const promptRole = activeDomain === "Technical" 
-      ? "Senior Technical Interviewer" 
-      : "Competitive Exam Coach";
-    const promptDetail = activeDomain === "Technical" 
-      ? "technical reason and a Pro-Tip" 
-      : "logical shortcut or the formula";
-
     try {
       const response = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `Act as a ${promptRole}. Briefly explain why "${correctOption}" is the correct answer to: "${question.questionTitle}". Provide the ${promptDetail}. Max 3 sentences.` }] }]
+          contents: [{ parts: [{ text: `Explain why "${correctOption}" is correct for "${question.questionTitle}". 2 sentences max.` }] }]
         })
       });
       const data = await response.json();
@@ -71,45 +130,16 @@ function App() {
         setExplanations(prev => ({ ...prev, [question.id]: data.candidates[0].content.parts[0].text }));
       }
     } catch (error) {
-      setExplanations(prev => ({ ...prev, [question.id]: "Interviewer Note: AI connection lost." }));
+      setExplanations(prev => ({ ...prev, [question.id]: "Error loading insight." }));
     } finally {
       setLoadingAI(false);
     }
   };
 
-  // --- LOGIC ---
-  const getSkillData = () => {
-    return domains[activeDomain].map(sub => {
-      const catQuestions = questions.filter(q => q.category === sub);
-      const correctInCat = catQuestions.filter(q => answeredQuestions[q.id] === q.rightAnswer).length;
-      return {
-        subject: sub,
-        A: catQuestions.length > 0 ? (correctInCat / catQuestions.length) * 100 : 0,
-        fullMark: 100
-      };
-    });
-  };
-
-  const filteredQuestions = questions.filter(q => {
-    const matchesSearch = q.questionTitle.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesDifficulty = activeDifficulty === "All" || q.difficultyLevel === activeDifficulty;
-    return matchesSearch && matchesDifficulty;
-  });
-
-  const handleAnswer = (questionId, selected, correct) => {
-    if (answeredQuestions[questionId]) return;
-    let newScore = score;
-    if (selected === correct) {
-      newScore = score + 1;
-      setScore(newScore);
-    }
-    setAnsweredCount(prev => prev + 1);
-    setAnsweredQuestions(prev => ({...prev, [questionId]: selected}));
-    if (newScore > highScore) {
-      setHighScore(newScore);
-      localStorage.setItem("highScore", newScore);
-    }
-  };
+  const filteredQuestions = questions.filter(q => 
+    q.questionTitle.toLowerCase().includes(searchTerm.toLowerCase()) &&
+    (activeDifficulty === "All" || q.difficultyLevel === activeDifficulty)
+  );
 
   const currentQuestions = filteredQuestions.slice((currentPage - 1) * questionsPerPage, currentPage * questionsPerPage);
   const totalPages = Math.ceil(filteredQuestions.length / questionsPerPage);
@@ -119,78 +149,88 @@ function App() {
       <header className="main-header">
         <h1 className="logo-text">PrepMaster Pro</h1>
         <div className="header-stats">
-          <div className="stat-pill">Session: {score}/{answeredCount}</div>
+          <div className="stat-pill">Progress: {Object.keys(answeredQuestions).length}/{questions.length}</div>
           <div className="stat-pill">Best: {highScore}</div>
         </div>
       </header>
 
-      {/* Analytics Radar */}
-      {answeredCount > 0 && (
-        <div className="analytics-box animate-in">
-          <h4 className="chart-title">{activeDomain} PROFICIENCY</h4>
-          <ResponsiveContainer width="100%" height="100%">
-            <RadarChart cx="50%" cy="50%" outerRadius="70%" data={getSkillData()}>
-              <PolarGrid stroke="#30363d" />
-              <PolarAngleAxis dataKey="subject" tick={{ fill: '#c9d1d9', fontSize: 10 }} />
-              <Radar dataKey="A" stroke="#58a6ff" fill="#58a6ff" fillOpacity={0.5} />
-            </RadarChart>
-          </ResponsiveContainer>
+      {/* ✅ NEW: Gamified Player Card Analysis */}
+      {isSubmitted && (
+        <div className="player-card animate-in">
+          {loadingAudit ? (
+            <div className="loading-shimmer">Generating Player Diagnostic...</div>
+          ) : aiAudit && (
+            <>
+              <div className="card-top">
+                <div className="rank-orb">{aiAudit.rank}</div>
+                <div className="player-meta">
+                  <h2 className="player-title">{aiAudit.title}</h2>
+                  <p className="player-stats-text">Level Summary: {score}/{questions.length} Mastery</p>
+                </div>
+              </div>
+
+              <div className="stat-bars">
+                {Object.entries(aiAudit.stats).map(([label, value]) => (
+                  <div key={label} className="stat-row">
+                    <span className="stat-label">{label}</span>
+                    <div className="bar-container">
+                      <div className="bar-fill" style={{ width: `${value}%` }}></div>
+                    </div>
+                    <span className="stat-pct">{value}%</span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="quest-log">
+                <h4>⚔️ RECOMMENDED QUESTS</h4>
+                <ul>
+                  {aiAudit.quests.map((q, i) => (
+                    <li key={i}><span className="quest-tag">LVL UP</span> {q}</li>
+                  ))}
+                </ul>
+              </div>
+            </>
+          )}
         </div>
       )}
 
-      {/* ✅ NEW: Domain & Sub-Category Navigation */}
       <div className="toolbar">
         <div className="domain-toggle">
           {Object.keys(domains).map(d => (
-            <button 
-              key={d} 
-              className={`domain-btn ${activeDomain === d ? "active" : ""}`}
-              onClick={() => {
-                setActiveDomain(d);
-                setActiveSubCategory(domains[d][0]);
-                fetchQuestions(domains[d][0]);
-              }}
-            >
+            <button key={d} className={`domain-btn ${activeDomain === d ? "active" : ""}`}
+              onClick={() => { setActiveDomain(d); setActiveSubCategory("All"); fetchQuestions("All"); }}>
               {d}
             </button>
           ))}
         </div>
-
         <div className="sub-filter-row">
           {domains[activeDomain].map(sub => (
-            <button 
-              key={sub} 
-              className={`sub-nav-btn ${activeSubCategory === sub ? "active-sub" : ""}`}
-              onClick={() => { setActiveSubCategory(sub); fetchQuestions(sub); }}
-            >
+            <button key={sub} className={`sub-nav-btn ${activeSubCategory === sub ? "active-sub" : ""}`}
+              onClick={() => { setActiveSubCategory(sub); fetchQuestions(sub); }}>
               {sub}
+            </button>
+          ))}
+        </div>
+        
+        <div className="difficulty-row">
+          {["All", "Easy", "Medium", "Hard"].map(lvl => (
+            <button key={lvl} 
+              className={`diff-filter-btn ${activeDifficulty === lvl ? `active-${lvl}` : ""}`}
+              onClick={() => setActiveDifficulty(lvl)}>
+              {lvl}
             </button>
           ))}
         </div>
 
         <div className="meta-filters">
-           <div className="difficulty-row">
-            {["All", "Easy", "Medium", "Hard"].map(lvl => (
-              <button 
-                key={lvl} 
-                onClick={() => setActiveDifficulty(lvl)}
-                className={`diff-btn ${activeDifficulty === lvl ? "active-" + lvl : ""}`}
-              >
-                {lvl}
-              </button>
-            ))}
-          </div>
-          <input 
-            type="text" placeholder="Search title..." className="search-bar"
-            value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)}
-          />
+          <input type="text" placeholder="Search knowledge base..." className="search-bar" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+          <button className="refresh-btn" onClick={() => fetchQuestions(activeSubCategory)}>🔄 Shuffle</button>
         </div>
       </div>
 
       <div className="questions-grid">
         {currentQuestions.map((q, index) => {
           const userChoice = answeredQuestions[q.id];
-          const isAnswered = !!userChoice;
           return (
             <div key={q.id} className="study-card animate-in">
               <div className="card-header">
@@ -201,31 +241,44 @@ function App() {
               <div className="options-container">
                 {[q.option1, q.option2, q.option3, q.option4].map((option) => (
                   <button 
-                    key={option} disabled={isAnswered} 
-                    onClick={() => handleAnswer(q.id, option, q.rightAnswer)}
-                    className={`option-row ${isAnswered ? (option === q.rightAnswer ? "correct" : (option === userChoice ? "wrong" : "ignored")) : ""}`}
+                    key={option} 
+                    disabled={isSubmitted} 
+                    onClick={() => handleAnswer(q.id, option)}
+                    className={`option-row 
+                      ${userChoice === option ? "selected" : ""} 
+                      ${isSubmitted && option === q.rightAnswer ? "correct" : ""}
+                      ${isSubmitted && userChoice === option && option !== q.rightAnswer ? "wrong" : ""}
+                    `}
                   >
                     {option}
                   </button>
                 ))}
               </div>
-              {isAnswered && (
+
+              {isSubmitted && (
                 <div className="ai-section">
                   {!explanations[q.id] ? (
                     <button disabled={loadingAI} onClick={() => askGemini(q, q.rightAnswer)} className="ai-trigger-btn">
-                      {loadingAI && currentExplainingId === q.id ? "Thinking..." : "💡 Get AI Analysis"}
+                      {loadingAI && currentExplainingId === q.id ? "Consulting..." : "💡 Insight"}
                     </button>
                   ) : (
-                    <div className="ai-response">
-                      <strong>{activeDomain === "Technical" ? "INTERVIEWER" : "COACH"} INSIGHT:</strong>
-                      <p>{explanations[q.id]}</p>
-                    </div>
+                    <div className="ai-response"><p>{explanations[q.id]}</p></div>
                   )}
                 </div>
               )}
             </div>
           );
         })}
+      </div>
+
+      <div className="action-footer">
+        {!isSubmitted ? (
+          <button className="submit-exam-btn" onClick={handleSubmitExam} disabled={Object.keys(answeredQuestions).length === 0}>
+            Finish Assessment
+          </button>
+        ) : (
+          <button className="reset-btn" onClick={handleReset}>New Session</button>
+        )}
       </div>
 
       {totalPages > 1 && (
